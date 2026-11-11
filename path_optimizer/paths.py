@@ -91,6 +91,7 @@ __all__ = [
     "travel_distance",
     "tool_change",
     "path_steps",
+    "bed_offset",
     "to_fullcontrol",
     "to_fullcontrol_layers",
     "path_lengths",
@@ -2032,7 +2033,8 @@ def tool_change(tool, *, relative_e: bool | None = None) -> list:
 def path_steps(path, *, z: float = 0.0, scale: float = 1000.0,
                annotate: bool = True, travel: bool = True,
                retract: bool = False, retract_speed: float = 2400, retract_length: float = 0.5, unretract_speed: float = 1200, hop: float | None = None,
-               z_feedrate: float = 300, rapid_speed: float = 9000, label: str | None = None) -> list:
+               z_feedrate: float = 300, rapid_speed: float = 9000, label: str | None = None,
+               offset: tuple[float, float] | None = None) -> list:
     """One path as FullControl steps — the unit :func:`to_fullcontrol` is built from.
 
     Use this when the design needs something of yours between the paths: a
@@ -2082,6 +2084,10 @@ def path_steps(path, *, z: float = 0.0, scale: float = 1000.0,
         moves per path.
     label : str, optional
         Text for the comment, replacing the default ``"{kind} path {id}"``.
+    offset : (float, float), optional
+        ``(dx, dy)`` in millimetres, added to every point *after* scaling.
+        This is how a design gets placed on the bed; see
+        :func:`bed_offset`.
 
     Returns
     -------
@@ -2093,6 +2099,8 @@ def path_steps(path, *, z: float = 0.0, scale: float = 1000.0,
         raise ValueError("z is required: FullControl points are 3D")
     path = path if isinstance(path, Path) else Path(path)
     pts = path.nodes * scale
+    if offset is not None:
+        pts = pts + onp.asarray(offset, dtype=float)
 
     steps: list = []
     if annotate:
@@ -2130,13 +2138,37 @@ def path_steps(path, *, z: float = 0.0, scale: float = 1000.0,
     return steps + [fc.Point(x=float(x), y=float(y), z=z) for x, y in pts]
 
 
+def bed_offset(paths, *, bed_center: tuple[float, float],
+               scale: float = 1000.0) -> tuple[float, float]:
+    """The ``(dx, dy)`` in mm that puts the middle of ``paths`` on ``bed_center``.
+
+    The middle is the centre of the axis-aligned bounding box of every node,
+    after ``scale``.  ``bed_center`` is in printer coordinates, mm — e.g.
+    ``(150, 150)`` for a 300 x 300 bed homed at a corner, ``(0, 0)`` for a
+    delta.  Pass the result as ``offset`` to :func:`path_steps` or
+    :func:`to_fullcontrol`.
+
+    For a multi-layer design pass every layer's paths together (as
+    :func:`to_fullcontrol_layers` does), so all layers move by the same
+    amount and stay stacked.
+    """
+    nodes = [p.nodes for p in _as_paths(paths)]
+    if not nodes:
+        raise ValueError("cannot centre an empty design")
+    pts = onp.vstack(nodes) * scale
+    mid = (pts.min(axis=0) + pts.max(axis=0)) / 2.0
+    return (float(bed_center[0] - mid[0]), float(bed_center[1] - mid[1]))
+
+
 def to_fullcontrol(paths, *, z: float = 0.0, scale: float = 1000.0,
                    width: float | None = None, height: float | None = None,
                    print_speed: float | None = None,
                    travel_speed: float | None = None,
                    annotate: bool = True, retract: bool = False,
                    hop: float | None = None,
-                   on_kind: dict | None = None) -> list:
+                   on_kind: dict | None = None,
+                   bed_center: tuple[float, float] | None = None,
+                   offset: tuple[float, float] | None = None) -> list:
     """Build a FullControl design from paths.
 
     Returns a ``steps`` list ready for ``fc.transform(steps, "gcode", ...)`` or
@@ -2191,6 +2223,15 @@ def to_fullcontrol(paths, *, z: float = 0.0, scale: float = 1000.0,
         Emission is on *change*, so ordering with :func:`order_paths` — which
         keeps each kind contiguous — is what makes this once per kind instead of
         once per path.
+    bed_center : (float, float), optional
+        Printer coordinates, mm, to centre the design on — the middle of its
+        bounding box lands here.  E.g. ``(150, 150)`` for a 300 x 300 bed.
+        Omit to print at the paths' own coordinates.
+    offset : (float, float), optional
+        An explicit ``(dx, dy)`` shift in mm instead, as from
+        :func:`bed_offset`.  Use this when several calls must move together —
+        :func:`to_fullcontrol_layers` does — since ``bed_center`` centres each
+        call on its own.  Giving both is an error.
 
     Returns
     -------
@@ -2198,6 +2239,11 @@ def to_fullcontrol(paths, *, z: float = 0.0, scale: float = 1000.0,
         FullControl design steps.
     """
     fc = _fullcontrol()
+    paths = _as_paths(paths)
+    if bed_center is not None:
+        if offset is not None:
+            raise ValueError("give bed_center or offset, not both")
+        offset = bed_offset(paths, bed_center=bed_center, scale=scale)
     steps: list = []
     if width is not None or height is not None:
         steps.append(fc.ExtrusionGeometry(width=width, height=height))
@@ -2205,7 +2251,7 @@ def to_fullcontrol(paths, *, z: float = 0.0, scale: float = 1000.0,
         steps.append(fc.Printer(print_speed=print_speed,
                                 travel_speed=travel_speed))
     current_kind = object()                          # nothing started yet
-    for i, path in enumerate(_as_paths(paths)):
+    for i, path in enumerate(paths):
         if path.kind != current_kind:
             steps += list((on_kind or {}).get(path.kind, ()))
             current_kind = path.kind
@@ -2218,7 +2264,7 @@ def to_fullcontrol(paths, *, z: float = 0.0, scale: float = 1000.0,
         #                    label=label)
         steps += path_steps(path, z=z, scale=scale, annotate=annotate,
                             retract=retract, hop=hop,
-                            label=label)
+                            label=label, offset=offset)
     return steps
 
 
@@ -2231,8 +2277,20 @@ def to_fullcontrol_layers(layers, *, z0: float = 0.0,
     each run through :func:`extract_paths`.  Layer *k* is placed at
     ``z0 + k * layer_height``; ``height`` defaults to ``layer_height`` so the
     extrusion model matches the spacing unless told otherwise.
+
+    ``bed_center`` is honoured across the whole stack: one offset is computed
+    from the bounding box of every layer together, so the layers stay
+    aligned rather than each being centred on its own.
     """
     kwargs.setdefault("height", layer_height)
+    layers = [list(paths) for paths in layers]
+    bed_center = kwargs.pop("bed_center", None)
+    if bed_center is not None:
+        if kwargs.get("offset") is not None:
+            raise ValueError("give bed_center or offset, not both")
+        kwargs["offset"] = bed_offset([p for paths in layers for p in paths],
+                                      bed_center=bed_center,
+                                      scale=kwargs.get("scale", 1000.0))
     from path_optimizer.printers import raise3D_layer_change
     steps: list = []
     for k, paths in enumerate(layers):
