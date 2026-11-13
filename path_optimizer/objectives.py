@@ -12,8 +12,9 @@ or form finding.  These take a :class:`feax.Solution` directly — feax 0.8's
 they are functions rather than factories.
 
 **Stiffness / material** — :func:`create_compliance_fn`,
-:func:`create_volume_fn`, re-exported unchanged from :mod:`feax.gene` so one
-import covers every response.  These *are* factories: build them once in
+:func:`create_volume_fn`, from :mod:`feax.gene` so one import covers every
+response (the compliance function is wrapped to accept a :class:`feax.Solution`,
+which feax 0.9's version no longer does).  These *are* factories: build them once in
 :meth:`path_optimizer.Pipeline.build`.
 
 **Design regularisers** — :func:`grey_penalty`, :func:`ud_penalty`,
@@ -59,7 +60,9 @@ from collections.abc import Callable, Sequence
 import jax
 import jax.numpy as np
 import numpy as onp
-from feax.gene import create_compliance_fn, create_volume_fn
+import feax
+from feax.gene import create_volume_fn
+from feax.gene import create_compliance_fn as _feax_compliance_fn
 from feax.mechanics.orientation import orientation_tensor_2d
 
 from path_optimizer.materials import DEFAULT_SGN_BETA
@@ -79,6 +82,23 @@ __all__ = [
     "magnitude_consistency",
     "group_layers",
 ]
+
+
+# ── Stiffness ────────────────────────────────────────────────────────────────
+
+def create_compliance_fn(problem, surface_load_params=None):
+    """:func:`feax.gene.create_compliance_fn`, taking a :class:`feax.Solution`
+    as well as a flat (n,) or batched (B, n) DOF array.
+
+    feax 0.9 branches on ``sol.ndim``, which :class:`feax.Solution` lacks, so a
+    solver's return value has to be unwrapped to its ``dofs`` first.
+    """
+    compliance = _feax_compliance_fn(problem, surface_load_params)
+
+    def compliance_fn(sol):
+        return compliance(sol.dofs if isinstance(sol, feax.Solution) else sol)
+
+    return compliance_fn
 
 
 # ── Displacement matching ────────────────────────────────────────────────────

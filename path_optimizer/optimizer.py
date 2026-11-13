@@ -41,7 +41,7 @@ Example
             sample = fe.TracedParams(
                 volume_vars=(fe.TracedParams.create_node_var(self.problem, 0.5),))
             self.solver = po.make_linear_solver(self.problem, self.bc, sample)
-            self.compliance = fe.gene.create_compliance_fn(self.problem)
+            self.compliance = po.objectives.create_compliance_fn(self.problem)
             self.volume = fe.gene.create_volume_fn(self.problem)
 
         def transform(self, design, penalty=3.0):
